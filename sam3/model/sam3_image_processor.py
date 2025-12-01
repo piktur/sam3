@@ -4,11 +4,10 @@ from typing import Dict, List
 import numpy as np
 import PIL
 import torch
+from torchvision.transforms import v2
 
 from sam3.model import box_ops
-
 from sam3.model.data_misc import FindStage, interpolate
-from torchvision.transforms import v2
 
 
 class Sam3Processor:
@@ -46,10 +45,17 @@ class Sam3Processor:
 
         if isinstance(image, PIL.Image.Image):
             width, height = image.size
-        elif isinstance(image, (torch.Tensor, np.ndarray)):
+        elif isinstance(image, torch.Tensor):
+            # Tensor format: (C, H, W) or (H, W)
             height, width = image.shape[-2:]
+        elif isinstance(image, np.ndarray):
+            # NumPy format: (H, W, C) or (H, W)
+            if image.ndim == 3:
+                height, width = image.shape[:2]
+            else:
+                height, width = image.shape[-2:]
         else:
-            raise ValueError("Image must be a PIL image or a tensor")
+            raise ValueError("Image must be a PIL image, tensor, or numpy array")
 
         image = v2.functional.to_image(image).to(self.device)
         image = self.transform(image).unsqueeze(0)
@@ -81,9 +87,9 @@ class Sam3Processor:
         if not isinstance(images, list):
             raise ValueError("Images must be a list of PIL images or tensors")
         assert len(images) > 0, "Images list must not be empty"
-        assert isinstance(
-            images[0], PIL.Image.Image
-        ), "Images must be a list of PIL images"
+        assert isinstance(images[0], PIL.Image.Image), (
+            "Images must be a list of PIL images"
+        )
 
         state["original_heights"] = [image.height for image in images]
         state["original_widths"] = [image.width for image in images]

@@ -4,27 +4,24 @@ Transformer decoder.
 Inspired from Pytorch's version, adds the pre-norm variant
 """
 
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-
 import torch
+from torch import Tensor, nn
+from torchvision.ops.roi_align import RoIAlign
 
 from sam3.sam.transformer import RoPEAttention
 
-from torch import nn, Tensor
-from torchvision.ops.roi_align import RoIAlign
-
 from .act_ckpt_utils import activation_ckpt_wrapper
-
 from .box_ops import box_cxcywh_to_xyxy
-
 from .model_misc import (
+    MLP,
     gen_sineembed_for_position,
     get_activation_fn,
     get_clones,
     inverse_sigmoid,
-    MLP,
 )
 
 
@@ -71,7 +68,13 @@ class TransformerDecoderLayer(nn.Module):
         return tensor if pos is None else tensor + pos
 
     def forward_ffn(self, tgt):
-        with torch.amp.autocast(device_type="cuda", enabled=False):
+        # MPS fix: use nullcontext for unsupported device types
+        device_type = tgt.device.type
+        if device_type in ("cuda", "cpu"):
+            ctx = torch.amp.autocast(device_type=device_type, enabled=False)
+        else:
+            ctx = nullcontext()
+        with ctx:
             tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
         tgt = tgt + self.dropout4(tgt2)
         tgt = self.norm3(tgt)
@@ -277,8 +280,17 @@ class TransformerDecoder(nn.Module):
 
             if resolution is not None and stride is not None:
                 feat_size = resolution // stride
+                # MPS fix: use available device instead of hardcoded cuda
+                if torch.cuda.is_available():
+                    _device = "cuda"
+                elif (
+                    hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+                ):
+                    _device = "mps"
+                else:
+                    _device = "cpu"
                 coords_h, coords_w = self._get_coords(
-                    feat_size, feat_size, device="cuda"
+                    feat_size, feat_size, device=_device
                 )
                 self.compilable_cord_cache = (coords_h, coords_w)
                 self.compilable_stored_size = (feat_size, feat_size)
@@ -442,9 +454,9 @@ class TransformerDecoder(nn.Module):
             - valid_ratios/spatial_shapes: bs, nlevel, 2
         """
         if memory_mask is not None:
-            assert (
-                self.boxRPB == "none"
-            ), "inputting a memory_mask in the presence of boxRPB is unexpected/not implemented"
+            assert self.boxRPB == "none", (
+                "inputting a memory_mask in the presence of boxRPB is unexpected/not implemented"
+            )
 
         apply_dac = apply_dac if apply_dac is not None else self.dac
         if apply_dac:
@@ -514,18 +526,18 @@ class TransformerDecoder(nn.Module):
             query_pos = self.ref_point_head(query_sine_embed)  # nq, bs, d_model
 
             if self.boxRPB != "none" and reference_boxes is not None:
-                assert (
-                    spatial_shapes.shape[0] == 1
-                ), "only single scale support implemented"
+                assert spatial_shapes.shape[0] == 1, (
+                    "only single scale support implemented"
+                )
                 memory_mask = self._get_rpb_matrix(
                     reference_boxes,
                     (spatial_shapes[0, 0], spatial_shapes[0, 1]),
                 )
                 memory_mask = memory_mask.flatten(0, 1)  # (bs*n_heads, nq, H*W)
             if self.training:
-                assert (
-                    self.use_act_checkpoint
-                ), "Activation checkpointing not enabled in the decoder"
+                assert self.use_act_checkpoint, (
+                    "Activation checkpointing not enabled in the decoder"
+                )
             output, presence_out = activation_ckpt_wrapper(layer)(
                 tgt=output,
                 tgt_query_pos=query_pos,
@@ -674,9 +686,9 @@ class TransformerEncoderCrossAttention(nn.Module):
                 src_pos[0],
             )
 
-        assert (
-            src.shape[1] == prompt.shape[1]
-        ), "Batch size must be the same for src and prompt"
+        assert src.shape[1] == prompt.shape[1], (
+            "Batch size must be the same for src and prompt"
+        )
 
         output = src
 
